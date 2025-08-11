@@ -1,24 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from dotenv import load_dotenv
+import os
 
 # from app.api.routes import users, boards, lists, cards, comments, labels, invitations, activity_logs, notifications
 # from app.db.database import engine, Base
 
 # Base.metadata.create_all(bind=engine)
 
-app = FastAPI(
-    title="PM Hub",
-    description="Backend API za PM Hub projekat",
-    version="1.0.0",
-)
+load_dotenv()
 
-origins = [
-    "http://localhost:3000",
-]
+app = FastAPI(title=settings.app_name, debug=settings.debug)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[settings.frontend_url],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,5 +33,5 @@ app.add_middleware(
 # app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 
 @app.get("/")
-def read_root():
-    return {"message": "Welcome to PM Hub!"}
+def root():
+    return {"message": f"Welcome to {settings.app_name}"}
