@@ -11,3 +11,9 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 settings = Settings()
+
+print(settings.app_name)
+print(settings.debug)
+print(settings.secret_key)
+print(settings.database_url)
+print(settings.frontend_url)
