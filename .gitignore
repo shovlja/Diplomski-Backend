@@ -28,5 +28,6 @@ htmlcov/
 
 # Cache
 .mypy_cache/
+.pytest_cache/
 *.pyc
 app/core/__pycache__/config.cpython-311.pyc
