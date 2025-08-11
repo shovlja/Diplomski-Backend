@@ -29,3 +29,4 @@ htmlcov/
 # Cache
 .mypy_cache/
 *.pyc
+*.pyc
