@@ -28,5 +28,5 @@ htmlcov/
 
 # Cache
 .mypy_cache/
-*.pyc
+.pytest_cache/
 *.pyc
