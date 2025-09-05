@@ -11,6 +11,7 @@ load_dotenv()
 from app.core.config import settings
 from app.db.database import Base, engine
 from app.api.routes import auth_router
+from app.api.routes import users as users_router
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 
@@ -26,6 +27,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(users_router.router)
 
 async def wait_for_db(engine, timeout: float = 60.0, interval: float = 1.0):
     """Čeka da se DB podigne; radi i u docker-compose i lokalno."""
