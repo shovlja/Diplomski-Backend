@@ -12,22 +12,31 @@ from app.core.config import settings
 from app.db.database import Base, engine
 from app.api.routes import auth_router
 from app.api.routes import users as users_router
+from app.api.routes import teams as teams_router
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 
 origins_raw = os.getenv("FRONTEND_URL", settings.frontend_url)
-origins = [o.strip() for o in str(origins_raw).split(",") if o.strip()] or ["http://localhost:5173"]
+origins = [o.strip().rstrip("/") for o in str(origins_raw).split(",") if o.strip()]
+
+# Dev defaulti – obavezno tačan origin bez završne /
+defaults = ["http://localhost:5173", "http://127.0.0.1:5173"]
+for o in defaults:
+    if o not in origins:
+        origins.append(o)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=origins,                 # npr. ["http://localhost:5173"]
+    allow_credentials=False,               # ⬅️ sada su credentials OFF na FE
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],                  # optional
 )
 
 app.include_router(auth_router)
 app.include_router(users_router.router)
+app.include_router(teams_router.router)
 
 async def wait_for_db(engine, timeout: float = 60.0, interval: float = 1.0):
     """Čeka da se DB podigne; radi i u docker-compose i lokalno."""
