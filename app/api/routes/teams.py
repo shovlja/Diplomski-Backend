@@ -4,11 +4,16 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
+from datetime import datetime, timezone
+from app.models.invitation import InviteStatus, TeamInvite
+
+from pydantic import BaseModel, EmailStr
 
 from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.models.team import Team, TeamMember, TeamInvite, TeamRole, InviteStatus
+from app.models.team import Team, TeamMember, TeamRole
+from app.models.invitation import TeamInvite, InviteStatus
 from app.schemas.team import (
     TeamCreate,
     TeamUpdate,
@@ -19,6 +24,15 @@ from app.schemas.team import (
 )
 
 router = APIRouter(prefix="/api/v1/teams", tags=["teams"])
+
+class InviteIn(BaseModel):
+    email: EmailStr
+
+class InviteOut(BaseModel):
+    id: int
+    team_id: int
+    email: EmailStr
+    status: InviteStatus
 
 
 async def _has_team_role(
@@ -232,23 +246,54 @@ async def remove_member(
 
 # === Invites ===
 
-@router.post("/{team_id}/invites", response_model=TeamInviteOut)
+@router.post("/{team_id}/invites", response_model=InviteOut, status_code=status.HTTP_201_CREATED)
 async def invite_member(
     team_id: int,
-    payload: InviteCreate,
+    body: InviteIn,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    me = Depends(get_current_user),
 ):
-    if not await _has_team_role(db, team_id, current_user.id, {TeamRole.owner}):
-        raise HTTPException(403, "Insufficient permissions")
+    # 1) normalize email
+    email = body.email.strip().lower()
 
+    # 2) tim mora da postoji
+    team = await db.scalar(select(Team).where(Team.id == team_id))
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # 3) ako već postoji pending invite -> vrati ga (idempotentno)
+    existing = await db.scalar(
+        select(TeamInvite)
+        .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+    )
+    if existing:
+        # možemo i da “oživimo” expired -> pending; ali za sada samo vrati šta postoji
+        return InviteOut(id=existing.id, team_id=existing.team_id, email=existing.email, status=existing.status)
+
+    # 4) kreiraj novi invite
     inv = TeamInvite(
-        team_id=team_id, email=payload.email.lower(), invited_by=current_user.id
+        team_id=team_id,
+        email=email,
+        invited_by=me.id,           # UUID u tvojoj šemi
+        status=InviteStatus.pending
     )
     db.add(inv)
-    await db.commit()
-    await db.refresh(inv)
-    return inv
+    try:
+        await db.commit()
+        await db.refresh(inv)
+    except IntegrityError:
+        # ako se neko drugi “utrčao” i kreirao u međuvremenu, idemo idempotentno
+        await db.rollback()
+        again = await db.scalar(
+            select(TeamInvite)
+            .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+        )
+        if again:
+            return InviteOut(id=again.id, team_id=again.team_id, email=again.email, status=again.status)
+        # realna greška
+        raise HTTPException(status_code=500, detail="Failed to create invite")
+
+    return InviteOut(id=inv.id, team_id=inv.team_id, email=inv.email, status=inv.status)
 
 
 @router.post("/invites/{invite_id}/accept", response_model=dict)
@@ -265,6 +310,7 @@ async def accept_invite(
         raise HTTPException(403, "Invite not for this user")
 
     inv.status = InviteStatus.accepted
+    inv.resolved_at = datetime.now(timezone.utc)
     db.add(
         TeamMember(team_id=inv.team_id, user_id=current_user.id, role=TeamRole.developer)
     )
