@@ -1,11 +1,11 @@
+# app/api/routes/teams.py
 from typing import List, Set
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
-from datetime import datetime, timezone
-from app.models.invitation import InviteStatus, TeamInvite
+from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
 
@@ -14,19 +14,14 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.team import Team, TeamMember, TeamRole
 from app.models.invitation import TeamInvite, InviteStatus
-from app.schemas.team import (
-    TeamCreate,
-    TeamUpdate,
-    TeamOut,
-    InviteCreate,
-    TeamInviteOut,
-    MemberRoleUpdate,
-)
+from app.schemas.team import TeamCreate, TeamUpdate, TeamOut, MemberRoleUpdate
 
 router = APIRouter(prefix="/api/v1/teams", tags=["teams"])
 
+
 class InviteIn(BaseModel):
     email: EmailStr
+
 
 class InviteOut(BaseModel):
     id: int
@@ -36,13 +31,22 @@ class InviteOut(BaseModel):
 
 
 async def _has_team_role(
-    db: AsyncSession, team_id: int, user_id: int, allowed: Set[TeamRole]
+    db: AsyncSession, team_id: int, user_id: UUID | int, allowed: Set[TeamRole]
 ) -> bool:
     q = select(TeamMember).where(
         and_(TeamMember.team_id == team_id, TeamMember.user_id == user_id)
     )
     m = (await db.execute(q)).scalar_one_or_none()
     return bool(m and m.role in allowed)
+
+
+def _safe_notify(db: AsyncSession, recipient_id, kind: str, payload: dict):
+    try:
+        from app.models.notification import Notification  # lazy import
+        n = Notification(recipient_id=recipient_id, kind=kind, payload=payload)
+        db.add(n)
+    except Exception:
+        pass
 
 
 @router.get("/me", response_model=List[TeamOut])
@@ -53,10 +57,8 @@ async def my_teams(
     q = (
         select(Team)
         .join(TeamMember)
-        .where(TeamMember.user_id == current_user.id, Team.is_archived == False)
-        .options(
-            selectinload(Team.members).selectinload(TeamMember.user)  # ⬅️ DODATO
-        )
+        .where(TeamMember.user_id == current_user.id, Team.is_archived == False)  # noqa: E712
+        .options(selectinload(Team.members).selectinload(TeamMember.user))
     )
     res = await db.execute(q)
     return res.scalars().unique().all()
@@ -68,12 +70,10 @@ async def create_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # ukinuli smo unique constraint na name – više timova može imati isto ime
     team = Team(name=payload.name, description=payload.description)
     try:
         db.add(team)
-        await db.flush()  # dobijemo team.id
-
+        await db.flush()
         db.add(TeamMember(team_id=team.id, user_id=current_user.id, role=TeamRole.owner))
         await db.commit()
 
@@ -96,18 +96,13 @@ async def get_team(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = (
-        select(Team)
-        .where(Team.id == team_id)
-        .options(
-            selectinload(Team.members).selectinload(TeamMember.user)  # ⬅️ DODATO
-        )
+    q = select(Team).where(Team.id == team_id).options(
+        selectinload(Team.members).selectinload(TeamMember.user)
     )
     team = (await db.execute(q)).scalars().first()
     if not team:
         raise HTTPException(404, "Team not found")
 
-    # dozvola: mora biti član tima
     m = await db.execute(
         select(TeamMember).where(
             TeamMember.team_id == team_id, TeamMember.user_id == current_user.id
@@ -168,12 +163,11 @@ async def delete_team(
 @router.patch("/{team_id}/members/{user_id}", response_model=dict)
 async def change_member_role(
     team_id: int,
-    user_id: int,
+    user_id: UUID,
     payload: MemberRoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # samo owner može menjati uloge – ali ne za owner-a
     if not await _has_team_role(db, team_id, current_user.id, {TeamRole.owner}):
         raise HTTPException(403, "Insufficient permissions")
 
@@ -186,11 +180,25 @@ async def change_member_role(
     ).scalar_one_or_none()
     if not m:
         raise HTTPException(404, "Member not found")
-
     if m.role == TeamRole.owner:
         raise HTTPException(400, "Cannot change role of the owner")
+    if payload.role not in (TeamRole.developer, TeamRole.manager, TeamRole.owner):
+        raise HTTPException(422, "Invalid role")
 
+    team = await db.get(Team, team_id)
     m.role = payload.role
+
+    _safe_notify(
+        db,
+        recipient_id=user_id,
+        kind="team_role_changed",
+        payload={
+            "team_id": team_id,
+            "team_name": team.name if team else "",
+            "role": payload.role.value if hasattr(payload.role, "value") else str(payload.role),
+        },
+    )
+
     await db.commit()
     return {"ok": True}
 
@@ -198,14 +206,10 @@ async def change_member_role(
 @router.delete("/{team_id}/members/{user_id}", response_model=dict)
 async def remove_member(
     team_id: int,
-    user_id: int,
+    user_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # pravila:
-    # - owner može ukloniti bilo koga (osim owner-a)
-    # - svaki član može ukloniti SAMOG SEBE (leave team)
-    # - ako owner ukloni sebe → tim se briše
     me = current_user.id == user_id
     is_owner = await _has_team_role(db, team_id, current_user.id, {TeamRole.owner})
 
@@ -219,27 +223,48 @@ async def remove_member(
     if not m:
         raise HTTPException(404, "Member not found")
 
-    # zabranjeno: neko drugi pokušava da ukloni owner-a
+    team = await db.get(Team, team_id)
+
     if not me and m.role == TeamRole.owner:
         raise HTTPException(400, "Cannot remove the owner")
 
     if me:
-        # vlasnik sam sebe uklanja => brišemo tim
         if m.role == TeamRole.owner:
-            team = await db.get(Team, team_id)
             await db.delete(team)
             await db.commit()
             return {"ok": True}
-        # ostali mogu sami sebe
         await db.delete(m)
+        rows = (
+            await db.execute(
+                select(TeamMember.user_id).where(
+                    and_(TeamMember.team_id == team_id, TeamMember.user_id != user_id)
+                )
+            )
+        ).scalars().all()
+        for rid in rows:
+            _safe_notify(
+                db,
+                recipient_id=rid,
+                kind="member_left",
+                payload={
+                    "team_id": team_id,
+                    "team_name": team.name if team else "",
+                    "actor_display_name": current_user.display_name or "Member",
+                },
+            )
         await db.commit()
         return {"ok": True}
 
-    # ostaje: owner uklanja druge
     if not is_owner:
         raise HTTPException(403, "Insufficient permissions")
 
     await db.delete(m)
+    _safe_notify(
+        db,
+        recipient_id=user_id,
+        kind="team_kicked",
+        payload={"team_id": team_id, "team_name": team.name if team else ""},
+    )
     await db.commit()
     return {"ok": True}
 
@@ -251,46 +276,53 @@ async def invite_member(
     team_id: int,
     body: InviteIn,
     db: AsyncSession = Depends(get_db),
-    me = Depends(get_current_user),
+    me: User = Depends(get_current_user),
 ):
-    # 1) normalize email
-    email = body.email.strip().lower()
+    if not await _has_team_role(db, team_id, me.id, {TeamRole.owner, TeamRole.manager}):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # 2) tim mora da postoji
+    email = body.email.strip().lower()
     team = await db.scalar(select(Team).where(Team.id == team_id))
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    # 3) ako već postoji pending invite -> vrati ga (idempotentno)
+    # UZMI NAJSKORIJI invite za ovaj par (team_id, email)
     existing = await db.scalar(
         select(TeamInvite)
         .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+        .order_by(TeamInvite.id.desc())
     )
-    if existing:
-        # možemo i da “oživimo” expired -> pending; ali za sada samo vrati šta postoji
-        return InviteOut(id=existing.id, team_id=existing.team_id, email=existing.email, status=existing.status)
 
-    # 4) kreiraj novi invite
+    # Ako postoji i još je pending → vrati taj (ne kreiraj duplikat)
+    if existing and existing.status == InviteStatus.pending:
+        return InviteOut(
+            id=existing.id,
+            team_id=existing.team_id,
+            email=existing.email,
+            status=existing.status,
+        )
+
+    # Inače, kreiraj NOVI pending invite
     inv = TeamInvite(
         team_id=team_id,
         email=email,
-        invited_by=me.id,           # UUID u tvojoj šemi
-        status=InviteStatus.pending
+        invited_by=me.id,
+        status=InviteStatus.pending,
     )
     db.add(inv)
     try:
         await db.commit()
         await db.refresh(inv)
     except IntegrityError:
-        # ako se neko drugi “utrčao” i kreirao u međuvremenu, idemo idempotentno
         await db.rollback()
+        # fallback – pokušaj opet pročitati najnoviji (npr. u slučaju retry-a)
         again = await db.scalar(
             select(TeamInvite)
             .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+            .order_by(TeamInvite.id.desc())
         )
         if again:
             return InviteOut(id=again.id, team_id=again.team_id, email=again.email, status=again.status)
-        # realna greška
         raise HTTPException(status_code=500, detail="Failed to create invite")
 
     return InviteOut(id=inv.id, team_id=inv.team_id, email=inv.email, status=inv.status)
@@ -310,9 +342,26 @@ async def accept_invite(
         raise HTTPException(403, "Invite not for this user")
 
     inv.status = InviteStatus.accepted
-    inv.resolved_at = datetime.now(timezone.utc)
-    db.add(
-        TeamMember(team_id=inv.team_id, user_id=current_user.id, role=TeamRole.developer)
+    inv.resolved_at = func.now()  # server-side vreme
+    db.add(TeamMember(team_id=inv.team_id, user_id=current_user.id, role=TeamRole.developer))
+
+    team = await db.get(Team, inv.team_id)
+    _safe_notify(
+        db,
+        recipient_id=inv.invited_by,
+        kind="invite_accepted",
+        payload={
+            "team_id": inv.team_id,
+            "team_name": team.name if team else "",
+            "actor_display_name": current_user.display_name or "Member",
+        },
     )
+    _safe_notify(
+        db,
+        recipient_id=current_user.id,
+        kind="team_joined",
+        payload={"team_id": inv.team_id, "team_name": team.name if team else ""},
+    )
+
     await db.commit()
     return {"ok": True}

@@ -1,10 +1,8 @@
-# app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os, asyncio, time
-
-from sqlalchemy import text  # 👈 ping upit
+from sqlalchemy import text
 
 load_dotenv()
 
@@ -28,17 +26,18 @@ for o in defaults:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,                 # npr. ["http://localhost:5173"]
-    allow_credentials=False,               # ⬅️ sada su credentials OFF na FE
+    allow_origins=origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],                  # optional
+    expose_headers=["*"],
 )
 
 app.include_router(auth_router)
 app.include_router(users_router.router)
 app.include_router(teams_router.router)
 app.include_router(notifications_router.router)
+
 
 async def wait_for_db(engine, timeout: float = 60.0, interval: float = 1.0):
     """Čeka da se DB podigne; radi i u docker-compose i lokalno."""
@@ -54,12 +53,15 @@ async def wait_for_db(engine, timeout: float = 60.0, interval: float = 1.0):
             await asyncio.sleep(interval)
     raise RuntimeError(f"Database not ready after {timeout}s") from last_error
 
+
 @app.on_event("startup")
 async def on_startup():
-    # sačekaj spremnost baze pa tek onda kreiraj šemu
+    # VAŽNO: importuj sve modele PRE create_all, da Notification završi u metadata
+    from app.models import user, team, invitation, notification  # noqa: F401
     await wait_for_db(engine, timeout=60.0)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
 
 @app.get("/")
 async def root():

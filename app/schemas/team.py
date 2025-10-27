@@ -1,13 +1,15 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List
+from typing import Optional, List, Literal
 from enum import Enum
 from datetime import datetime
 from uuid import UUID
+
 
 class TeamRole(str, Enum):
     owner = "owner"
     manager = "manager"
     developer = "developer"
+
 
 class UserBrief(BaseModel):
     id: UUID
@@ -19,7 +21,8 @@ class UserBrief(BaseModel):
 
 
 class TeamMemberUserLite(BaseModel):
-    id: str
+    # ⬅️ ranije: str — sada dosledno UUID
+    id: UUID
     display_name: str
     avatar_url: Optional[str] = None
 
@@ -29,7 +32,8 @@ class TeamMemberUserLite(BaseModel):
 
 class TeamMemberOut(BaseModel):
     id: int
-    user_id: UUID              # ⬅️ OBAVEZNO UUID, ne str
+    # ⬅️ ostaje UUID (bitno da FE ne pretvara u number!)
+    user_id: UUID
     role: TeamRole
     user: Optional[UserBrief] = None
 
@@ -67,7 +71,8 @@ class TeamInviteOut(BaseModel):
     id: int
     team_id: int
     email: EmailStr
-    invited_by: int
+    # ⬅️ ranije int — korisnici su UUID
+    invited_by: UUID
     status: str
     created_at: datetime
 
@@ -75,5 +80,9 @@ class TeamInviteOut(BaseModel):
         orm_mode = True
 
 
+# Dozvoli samo non-owner role za PATCH members/{user_id}
+NonOwnerRole = Literal["manager", "developer"]
+
+
 class MemberRoleUpdate(BaseModel):
-    role: TeamRole
+    role: NonOwnerRole
