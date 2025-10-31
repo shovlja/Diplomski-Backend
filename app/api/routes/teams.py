@@ -1,7 +1,6 @@
-# app/api/routes/teams.py
 from typing import List, Set
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -14,6 +13,7 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.team import Team, TeamMember, TeamRole
 from app.models.invitation import TeamInvite, InviteStatus
+from app.models.board import Board  # ⬅️ DODATO: za provere veza sa boardovima
 from app.schemas.team import TeamCreate, TeamUpdate, TeamOut, MemberRoleUpdate
 
 router = APIRouter(prefix="/api/v1/teams", tags=["teams"])
@@ -41,6 +41,7 @@ async def _has_team_role(
 
 
 def _safe_notify(db: AsyncSession, recipient_id, kind: str, payload: dict):
+    """Never crash the request because of notifications."""
     try:
         from app.models.notification import Notification  # lazy import
         n = Notification(recipient_id=recipient_id, kind=kind, payload=payload)
@@ -153,6 +154,16 @@ async def delete_team(
     if not await _has_team_role(db, team_id, current_user.id, {TeamRole.owner}):
         raise HTTPException(403, "Insufficient permissions")
 
+    # ⬇️ BLOK: ne dozvoli brisanje ako postoje boardovi
+    cnt = (await db.execute(
+        select(func.count()).select_from(Board).where(Board.team_id == team_id)
+    )).scalar_one()
+    if cnt and cnt > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="This team cannot be deleted because it still owns one or more boards. Delete or reassign those boards first."
+        )
+
     await db.delete(team)
     await db.commit()
     return None
@@ -230,9 +241,19 @@ async def remove_member(
 
     if me:
         if m.role == TeamRole.owner:
+            # ⬇️ BLOK: owner ne sme da “leave” ako postoje boardovi
+            cnt = (await db.execute(
+                select(func.count()).select_from(Board).where(Board.team_id == team_id)
+            )).scalar_one()
+            if cnt and cnt > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="You cannot leave this team because it still owns one or more boards. Transfer or delete those boards first."
+                )
             await db.delete(team)
             await db.commit()
             return {"ok": True}
+
         await db.delete(m)
         rows = (
             await db.execute(
@@ -278,22 +299,22 @@ async def invite_member(
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
+    # Owner/Manager only
     if not await _has_team_role(db, team_id, me.id, {TeamRole.owner, TeamRole.manager}):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     email = body.email.strip().lower()
+
     team = await db.scalar(select(Team).where(Team.id == team_id))
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    # UZMI NAJSKORIJI invite za ovaj par (team_id, email)
     existing = await db.scalar(
         select(TeamInvite)
-        .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+        .where(TeamInvite.team_id == team_id, func.lower(TeamInvite.email) == email)
         .order_by(TeamInvite.id.desc())
     )
 
-    # Ako postoji i još je pending → vrati taj (ne kreiraj duplikat)
     if existing and existing.status == InviteStatus.pending:
         return InviteOut(
             id=existing.id,
@@ -302,7 +323,26 @@ async def invite_member(
             status=existing.status,
         )
 
-    # Inače, kreiraj NOVI pending invite
+    if existing:
+        await db.execute(
+            update(TeamInvite)
+            .where(TeamInvite.id == existing.id)
+            .values(
+                status=InviteStatus.pending,
+                invited_by=me.id,
+                resolved_at=None,
+                created_at=func.now(),
+            )
+        )
+        await db.commit()
+        fresh = await db.get(TeamInvite, existing.id)
+        return InviteOut(
+            id=fresh.id,
+            team_id=fresh.team_id,
+            email=fresh.email,
+            status=fresh.status,
+        )
+
     inv = TeamInvite(
         team_id=team_id,
         email=email,
@@ -315,14 +355,25 @@ async def invite_member(
         await db.refresh(inv)
     except IntegrityError:
         await db.rollback()
-        # fallback – pokušaj opet pročitati najnoviji (npr. u slučaju retry-a)
         again = await db.scalar(
             select(TeamInvite)
-            .where(TeamInvite.team_id == team_id, TeamInvite.email == email)
+            .where(TeamInvite.team_id == team_id, func.lower(TeamInvite.email) == email)
             .order_by(TeamInvite.id.desc())
         )
         if again:
-            return InviteOut(id=again.id, team_id=again.team_id, email=again.email, status=again.status)
+            await db.execute(
+                update(TeamInvite)
+                .where(TeamInvite.id == again.id)
+                .values(
+                    status=InviteStatus.pending,
+                    invited_by=me.id,
+                    resolved_at=None,
+                    created_at=func.now(),
+                )
+            )
+            await db.commit()
+            ref = await db.get(TeamInvite, again.id)
+            return InviteOut(id=ref.id, team_id=ref.team_id, email=ref.email, status=ref.status)
         raise HTTPException(status_code=500, detail="Failed to create invite")
 
     return InviteOut(id=inv.id, team_id=inv.team_id, email=inv.email, status=inv.status)
@@ -342,7 +393,7 @@ async def accept_invite(
         raise HTTPException(403, "Invite not for this user")
 
     inv.status = InviteStatus.accepted
-    inv.resolved_at = func.now()  # server-side vreme
+    inv.resolved_at = func.now()
     db.add(TeamMember(team_id=inv.team_id, user_id=current_user.id, role=TeamRole.developer))
 
     team = await db.get(Team, inv.team_id)

@@ -12,6 +12,7 @@ from app.api.routes import auth_router
 from app.api.routes import users as users_router
 from app.api.routes import teams as teams_router
 from app.api.routes import notifications as notifications_router
+from app.api.routes import boards as boards_router
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 
@@ -37,6 +38,7 @@ app.include_router(auth_router)
 app.include_router(users_router.router)
 app.include_router(teams_router.router)
 app.include_router(notifications_router.router)
+app.include_router(boards_router.router)
 
 
 async def wait_for_db(engine, timeout: float = 60.0, interval: float = 1.0):
