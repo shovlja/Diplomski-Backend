@@ -1,11 +1,18 @@
+# app/models/board.py
 from __future__ import annotations
 
 import enum
+from typing import TYPE_CHECKING
+
 from sqlalchemy import String, Enum, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.sqltypes import DateTime
 
 from app.db.database import Base
+
+# >>> samo za tipovanje, da ne napravi kružni import u runtime-u
+if TYPE_CHECKING:
+    from app.models.board_list import BoardList  # noqa: F401
 
 
 class BoardPrivacy(str, enum.Enum):
@@ -20,17 +27,25 @@ class Board(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(180), nullable=False)
 
-    # Enum sa stabilnim imenom da SQLAlchemy automatski kreira tip u PG
     privacy: Mapped[BoardPrivacy] = mapped_column(
         Enum(BoardPrivacy, name="boardprivacy"),
         default=BoardPrivacy.private,
         nullable=False,
     )
 
+    # Pylance više neće prijavljivati “BoardList is not defined”
+    lists: Mapped[list["BoardList"]] = relationship(
+        "BoardList",
+        back_populates="board",
+        cascade="all, delete-orphan",
+        order_by="BoardList.position",
+        lazy="selectin",
+    )
+
     team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
-    tags: Mapped[str | None] = mapped_column(String(200), nullable=True)   # CSV: "Platform,Marketing"
+    tags: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cover: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

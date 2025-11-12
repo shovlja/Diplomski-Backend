@@ -1,10 +1,14 @@
+# app/api/routes/boards.py
+from __future__ import annotations
+
+import enum
+from datetime import timezone
+from typing import List
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-from datetime import timezone
-from typing import List
-import enum
+from sqlalchemy.orm import selectinload, joinedload
 
 from app.db.database import get_db
 from app.api.deps import get_current_user
@@ -12,6 +16,13 @@ from app.models.user import User
 from app.models.board import Board, BoardStar
 from app.models.team import Team, TeamMember, TeamRole
 from app.schemas.board import BoardOut, BoardCreate, BoardUpdate
+
+from app.models.board_list import BoardList
+from app.models.board_card import BoardCard
+from app.models.board_checklist import BoardChecklist, BoardChecklistItem
+from app.models.board_label import CardLabel
+from app.models.board_comment import BoardComment
+from app.models.board_member import CardMember
 
 router = APIRouter(prefix="/api/v1/boards", tags=["Boards"])
 
@@ -43,6 +54,87 @@ async def _preview_members(db: AsyncSession, team_id: int | None):
     )
     rows = (await db.execute(q)).all()
     return [{"id": uid, "name": name or "User", "avatarUrl": avatar} for (uid, name, avatar) in rows]
+
+
+@router.get("/{board_id}")
+async def get_board(board_id: int, db: AsyncSession = Depends(get_db)):
+    # Eager-load svega što koristimo u serijalizaciji, uključujući CardLabel.label
+    stmt = (
+        select(Board)
+        .where(Board.id == board_id)
+        .options(
+            joinedload(Board.lists)
+            .joinedload(BoardList.cards)
+            .joinedload(BoardCard.checklists)
+            .joinedload(BoardChecklist.items),
+
+            joinedload(Board.lists)
+            .joinedload(BoardList.cards)
+            .joinedload(BoardCard.labels)
+            .joinedload(CardLabel.label),  # <<< bitno: eager load BoardLabel preko CardLabel.label
+
+            joinedload(Board.lists)
+            .joinedload(BoardList.cards)
+            .joinedload(BoardCard.comments),
+
+            joinedload(Board.lists)
+            .joinedload(BoardList.cards)
+            .joinedload(BoardCard.members)
+            .joinedload(CardMember.user),
+        )
+    )
+    board = (await db.execute(stmt)).scalars().unique().first()
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    def s_label(l: CardLabel):
+        # Guard u slučaju da je labela obrisana ili nije dovedena iz nekog razloga
+        lab = getattr(l, "label", None)
+        if not lab:
+            return {"id": l.label_id, "name": "", "color": "#9CA3AF"}  # neutralni fallback
+        return {"id": lab.id, "name": lab.name, "color": lab.color}
+
+    def s_member(m: CardMember):
+        u = m.user
+        return {
+            "id": str(m.user_id),
+            "display_name": (u.display_name if u else None),
+            "avatar_url": (u.avatar_url if u else None),
+        }
+
+    def s_checklist(ch: BoardChecklist):
+        return {
+            "id": str(ch.id),
+            "title": ch.title,
+            "items": [{"id": str(i.id), "text": i.text, "done": i.done} for i in ch.items],
+        }
+
+    def s_card(c: BoardCard):
+        return {
+            "id": c.id,
+            "title": c.title,
+            "position": c.position,
+            "description": c.description,
+            "due_date": c.due_date.isoformat() if c.due_date else None,
+            "due_complete": c.due_complete,
+            "labels": [s_label(cl) for cl in c.labels],
+            "checklists": [s_checklist(ch) for ch in c.checklists],
+            "comments": [
+                {
+                    "id": str(cm.id),
+                    "author": cm.author,
+                    "created_at": (cm.created_at.astimezone(timezone.utc).isoformat() if cm.created_at else None),
+                    "text": cm.text or "",
+                }
+                for cm in c.comments
+            ],
+            "members": [s_member(m) for m in c.members],
+        }
+
+    def s_list(l: BoardList):
+        return {"id": l.id, "title": l.title, "position": l.position, "cards": [s_card(c) for c in l.cards]}
+
+    return {"id": board.id, "title": board.title, "team_id": board.team_id, "lists": [s_list(l) for l in board.lists]}
 
 
 @router.get("", response_model=List[BoardOut])
@@ -135,6 +227,7 @@ async def create_board(
                 )
             )
         ).scalar_one_or_none()
+    #   ^^^^ (napomena: ako želiš da i manager može, ovde proširi uslov)
         if not role:
             raise HTTPException(status_code=403, detail="Only team owners can create team boards")
 
@@ -248,7 +341,7 @@ async def update_board(
         title=b.title,
         teamName=(await db.get(Team, b.team_id)).name if b.team_id else None,
         privacy=_privacy_value(b.privacy),
-        isStarred=False,  # možeš po želji da vratiš stvarno stanje ako ti treba
+        isStarred=False,  # po želji vrati realno stanje
         lastActivity=(b.updated_at or b.created_at).astimezone(timezone.utc).isoformat(),
         cover=b.cover,
         members=members,
