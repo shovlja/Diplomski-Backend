@@ -10,11 +10,12 @@ from app.core.config import settings
 from app.db.database import Base, engine
 
 # postojeći routers
-from app.api.routes import auth_router
+from app.api.routes import auth as auth_router
 from app.api.routes import users as users_router
 from app.api.routes import teams as teams_router
 from app.api.routes import notifications as notifications_router
 from app.api.routes import boards as boards_router
+from app.api.routes import events as events_router
 
 # kanban routers (lists/cards/labels/comments/checklists)
 from app.api.routes import kanban_lists as kanban_lists_router
@@ -43,11 +44,12 @@ app.add_middleware(
 )
 
 # include routers
-app.include_router(auth_router)
+app.include_router(auth_router.router)
 app.include_router(users_router.router)
 app.include_router(teams_router.router)
 app.include_router(notifications_router.router)
 app.include_router(boards_router.router)
+app.include_router(events_router.router)
 
 # lists
 app.include_router(kanban_lists_router.router)   # /api/v1/lists (PATCH/DELETE)

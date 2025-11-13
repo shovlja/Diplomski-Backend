@@ -5,7 +5,7 @@ from uuid import UUID as PyUUID, uuid4
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID 
 from sqlalchemy import String, Boolean, DateTime, Enum as SQLEnum, text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base  # <-- VAŽNO: uvezi Base iz async modula
 
@@ -30,3 +30,4 @@ class User(Base):
     system_role: Mapped[SystemRole] = mapped_column(SQLEnum(SystemRole), nullable=False, default=SystemRole.USER)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    events = relationship("Event", back_populates="owner", cascade="all, delete-orphan")
