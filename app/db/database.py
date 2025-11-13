@@ -1,29 +1,27 @@
 # app/db/database.py
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=True  # za debug štampu SQL upita, možeš kasnije isključiti
-)
-
-SessionLocal = sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    autocommit=False,
-    autoflush=False,
-    expire_on_commit=False
-)
+from typing import AsyncGenerator
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.orm import declarative_base
+from app.core.config import settings
 
 Base = declarative_base()
 
-# FastAPI dependencija za dobijanje async sesije
-async def get_db():
-    async with SessionLocal() as session:
+# Async engine (asyncpg)
+engine = create_async_engine(
+    settings.database_url,  # e.g. postgresql+asyncpg://user:pass@host:5432/db
+    echo=False,
+    pool_pre_ping=True,
+)
+
+# Async session factory
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    expire_on_commit=False,
+    autoflush=False,
+    class_=AsyncSession,
+)
+
+# FastAPI dependency (async)
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
         yield session

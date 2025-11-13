@@ -1,8 +1,8 @@
+# tests/db_test.py
 import pytest
-import asyncio
 from sqlalchemy import text
-from app.db.database import engine, get_db
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.database import engine, get_db
 
 @pytest.mark.asyncio
 async def test_db_connection():
@@ -12,8 +12,9 @@ async def test_db_connection():
 
 @pytest.mark.asyncio
 async def test_session_dependency():
-    # Test da li get_db vraća AsyncSession
     gen = get_db()
-    session = await gen.__anext__()
-    assert isinstance(session, AsyncSession)
-    await gen.aclose()
+    session = await anext(gen)  # py3.11
+    try:
+        assert isinstance(session, AsyncSession)
+    finally:
+        await gen.aclose()

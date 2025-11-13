@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:15
@@ -13,6 +11,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h localhost -p 5432"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
 
   backend:
     build: .
@@ -22,14 +26,24 @@ services:
       - .:/app
     ports:
       - "8000:8000"
+    # ✅ koristi mapu umesto liste za environment – čitljivije i bez grešaka
     environment:
-      - DATABASE_URL=postgresql+asyncpg://pmhub_user:1111002@postgres:5432/pm_hub_db
-      - APP_NAME=PM Hub
-      - DEBUG=True
-      - FRONTEND_URL=http://localhost:5173
-
+      DATABASE_URL: "postgresql+asyncpg://pmhub_user:1111002@postgres:5432/pm_hub_db"
+      APP_NAME: "PM Hub"
+      DEBUG: "true"                # env vrednosti su uvek stringovi
+      FRONTEND_URL: "http://localhost:5173"
+      JWT_ALG: "HS256"
+      JWT_EXPIRES_IN: "3600"       # npr. 1h
+      JWT_SECRET_FILE: "/run/secrets/jwt_secret"
+    secrets:
+      - jwt_secret
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
+
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
